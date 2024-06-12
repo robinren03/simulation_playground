@@ -16,13 +16,16 @@ def cleanup():
 
 def simulate_allreduce_async(data):
     # 模拟一个简单的allreduce操作
-    return dist.all_reduce(data, op=dist.ReduceOp.SUM, async_op=True)
+    dist.all_reduce(data, op=dist.ReduceOp.SUM, async_op=True)
+    return False, 0
 
 def compute_kernel(data):
     """A simple computation kernel that performs element-wise operations on the data."""
     for _ in range(40):  # Simulate heavy computation
-        data = data * torch.sin(data) + torch.cos(data)
-    return data
+        # data = data * torch.sin(data) + torch.cos(data)
+        data = data * data.T
+        data = data / torch.norm(data, dim=1, keepdim=True)
+    return False, 0
 
 def mix_operations(data, data1, delay_ms):
     
@@ -31,16 +34,23 @@ def mix_operations(data, data1, delay_ms):
     with torch.cuda.stream(comm_stream):
         simulate_allreduce_async(data)
     
+    st_time = torch.cuda.Event(enable_timing=True)
+    en_time = torch.cuda.Event(enable_timing=True)
+
     # 创造一个新的流进行计算，并在该流中立即引入延迟
     compute_stream = torch.cuda.Stream()
     with torch.cuda.stream(compute_stream):
         # 引入b毫秒的延迟（b * 10^6 纳秒）
         if (delay_ms > 10): torch.cuda._sleep(int(delay_ms * 1e6))
+        st_time.record()
         # 在延迟后启动计算任务
         compute_kernel(data1)
+        en_time.record()
     
     # 等待计算流完成所有操作
     compute_stream.synchronize()
+    pp = st_time.elapsed_time(en_time)
+    return True, pp
 
 
 
@@ -51,22 +61,25 @@ def measure_time(func, *args, **kwargs):
     
     torch.cuda.synchronize()
     start_time.record()
+    time = 0
     for _ in range(10):
-        _ = func(*args, **kwargs)
+        ex, t = func(*args, **kwargs)
         dist.barrier()
         torch.cuda.synchronize()
+        if (ex): time += t
 
     end_time.record()
 
-    elapsed_time_ms = start_time.elapsed_time(end_time) / 10
+    if (time == 0): elapsed_time_ms = start_time.elapsed_time(end_time) / 10
+    else: elapsed_time_ms = time / 10
     return elapsed_time_ms
 
 def example(rank, world_size, data_size):
     setup(rank, world_size)
 
     # 准备数据
-    data = torch.ones(data_size, device=rank)
-    data1 = torch.ones(data_size, device=rank)
+    data = torch.ones((int(data_size**0.5), int(data_size**0.5)), device=rank)
+    data1 = torch.ones((int(data_size**0.5), int(data_size**0.5)), device=rank)
     
     # Measure allreduce time
     allreduce_time = measure_time(simulate_allreduce_async, data)
@@ -76,7 +89,7 @@ def example(rank, world_size, data_size):
     # print(rank, "GOOD 3!")
 
     # Measure computation time without overlap
-    compute_time = measure_time(compute_kernel, data)
+    compute_time = measure_time(compute_kernel, data1)
     # shared_a[rank] = float(compute_time)
     # mp.synchoronize()
     # compute_time = max(shared_a)
@@ -89,7 +102,7 @@ def example(rank, world_size, data_size):
     # Experiment with overlapping
     for overlap in overlaps:
         delay = allreduce_time * (1 - overlap)
-        d_time = measure_time(mix_operations, data, data1, delay) - delay
+        d_time = measure_time(mix_operations, data, data1, delay)
         if (rank == 0): compute_times_normalized.append(d_time / compute_time)
         print(f"Rank:{rank}, Overlap rate:{overlap}, D_time: {d_time}")
     
