@@ -25,6 +25,7 @@ def compute_kernel(data):
         # data = data * torch.sin(data) + torch.cos(data)
         data = data * data.T
         data = data / torch.norm(data, dim=1, keepdim=True)
+        print(torch.distributed.get_rank())
     return False, 0
 
 def mix_operations(data, data1, delay_ms):
@@ -65,10 +66,10 @@ def measure_time(func, *args, **kwargs):
     for _ in range(10):
         ex, t = func(*args, **kwargs)
         dist.barrier()
-        torch.cuda.synchronize()
         if (ex): time += t
 
     end_time.record()
+    torch.cuda.synchronize()
 
     if (time == 0): elapsed_time_ms = start_time.elapsed_time(end_time) / 10
     else: elapsed_time_ms = time / 10
